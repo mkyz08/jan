@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>JANコード読み取り</title>
-<!-- バーコード解析ライブラリ（カメラ操作は使わず、解析だけに使う） -->
-<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<title>JANコード読み取り（zxing-wasm版）</title>
+<!-- バーコード解析エンジン（ZXing-C++のWebAssembly版。読み取り専用ビルド） -->
+<script src="https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.5/dist/iife/reader/index.js"></script>
 <style>
   body { font-family: -apple-system, "Hiragino Sans", sans-serif; margin: 0; padding: 16px; max-width: 480px; }
   label { display: block; font-weight: 600; margin-bottom: 6px; }
@@ -29,7 +29,7 @@
 <label for="jan">JANコード</label>
 <div class="row">
   <input id="jan" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="13" placeholder="例: 4901234567894">
-  <button id="scanBtn" type="button">カメラで読む４</button>
+  <button id="scanBtn" type="button">カメラで読む６</button>
 </div>
 
 <div id="camRow" class="row sub" hidden>
@@ -62,17 +62,28 @@ const view = document.getElementById("view");
 const video = document.getElementById("video");
 
 let stream = null;          // カメラ映像
-let timer = null;           // 読み取りループ
+let scanning = false;       // 読み取りループ中か
 let selectedCamId = null;   // ユーザーが選んだカメラ
+let lastCode = null;        // 直前に読んだ番号（2回連続一致で確定）
 const canvas = document.createElement("canvas");
 const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
-// バーコード解析の設定（JAN = EAN-13 / EAN-8 のみ）
-const hints = new Map();
-hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8]);
-hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-const reader = new ZXing.MultiFormatReader();
-reader.setHints(hints);
+// 解析の設定（JAN = EAN-13 / EAN-8 のみ）
+const readerOptions = { formats: ["EAN13", "EAN8"], tryHarder: true, maxNumberOfSymbols: 1 };
+
+// 解析エンジン（.wasm）をページを開いた時点で読み込んでおく
+// ※ 自分のサーバーに .wasm を置く場合は、下のURLをそのパスに変える
+const engineReady = ZXingWASM.prepareZXingModule({
+  overrides: {
+    locateFile: (path, prefix) => path.endsWith(".wasm")
+      ? "https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.5/dist/reader/" + path
+      : prefix + path
+  },
+  fireImmediately: true
+});
+engineReady.catch(() => {
+  msg.textContent = "解析エンジンを読み込めません。ネットワークを確認してください。";
+});
 
 // JAN（EAN-13 / EAN-8）のチェックディジット検証
 function isValidJan(code) {
@@ -96,7 +107,7 @@ function pressEnter(el) {
   }
 }
 
-// カメラ一覧を取得し、背面カメラのIDを返す（診断ページで映った方法と同じ）
+// カメラ一覧を取得し、背面カメラのIDを返す
 async function prepareCameras() {
   const s = await navigator.mediaDevices.getUserMedia({ video: true }); // 許可を得てカメラ名を取得
   s.getTracks().forEach(t => t.stop());
@@ -124,17 +135,22 @@ async function prepareCameras() {
 async function startScan() {
   btn.textContent = "停止";
   msg.textContent = "バーコードを緑の枠内に横向きで合わせてください";
+  lastCode = null;
   try {
     const camId = selectedCamId || await prepareCameras();
     camSel.value = camId;
+    // カメラはIDで固定したうえで、高めの解像度を希望する（細いバーが潰れにくい）
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { deviceId: { exact: camId } }, audio: false
+      video: { deviceId: { exact: camId }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false
     });
     video.srcObject = stream;
     view.hidden = false;
     await video.play();
     setupZoom();
-    timer = setInterval(scanFrame, 150);
+    await engineReady;
+    scanning = true;
+    scanLoop();
   } catch (e) {
     msg.textContent = "カメラを起動できません（" + e.name + "）。HTTPSで開いているか、カメラの許可を確認してください。";
     stopScan();
@@ -142,8 +158,7 @@ async function startScan() {
 }
 
 function stopScan() {
-  clearInterval(timer);
-  timer = null;
+  scanning = false;
   if (stream) stream.getTracks().forEach(t => t.stop());
   stream = null;
   video.srcObject = null;
@@ -152,35 +167,43 @@ function stopScan() {
   btn.textContent = "カメラで読む";
 }
 
+// 1枚解析し終わったら次の1枚へ（解析が重なって遅くならないように）
+async function scanLoop() {
+  while (scanning) {
+    const code = await scanFrame();
+    if (!scanning) return;
+    if (code) {
+      if (code === lastCode) { onDetected(code); return; } // 2回連続で同じ番号なら確定
+      lastCode = code;
+    }
+    await new Promise(r => setTimeout(r, 80));
+  }
+}
+
 // 映像の中央（緑の枠の部分）を切り出して解析する
-function scanFrame() {
+async function scanFrame() {
   const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw || !vh) return;
+  if (!vw || !vh) return null;
   const sx = vw * 0.1, sy = vh * 0.3, sw = vw * 0.8, sh = vh * 0.4;
   const scale = Math.min(1, 1280 / sw);
   canvas.width = Math.round(sw * scale);
   canvas.height = Math.round(sh * scale);
   ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-  const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-  const lum = new Uint8ClampedArray(canvas.width * canvas.height);
-  for (let i = 0, j = 0; j < lum.length; i += 4, j++) {
-    lum[j] = (img[i] * 0.299 + img[i + 1] * 0.587 + img[i + 2] * 0.114) | 0;
-  }
-
-  let text;
   try {
-    const src = new ZXing.RGBLuminanceSource(lum, canvas.width, canvas.height);
-    text = reader.decodeWithState(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(src))).getText();
-  } catch (e) {
-    return; // 見つからなければ次のフレームへ
-  }
-  if (!isValidJan(text)) return;   // 誤読はスキップ
+    const results = await ZXingWASM.readBarcodes(imageData, readerOptions);
+    const r = results[0];
+    if (r && r.isValid && isValidJan(r.text)) return r.text;
+  } catch (e) {}
+  return null;
+}
 
+function onDetected(code) {
   stopScan();
-  input.value = text;
+  input.value = code;
   input.dispatchEvent(new Event("input", { bubbles: true }));
-  msg.textContent = "読み取りました: " + text;
+  msg.textContent = "読み取りました: " + code;
   if (navigator.vibrate) navigator.vibrate(100);
   pressEnter(input);               // Enterを自動実行
 }
