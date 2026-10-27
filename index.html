@@ -81,7 +81,7 @@ btn.addEventListener("click", async () => {
   try {
     await scanner.start(
       { facingMode: "environment" },          // 背面カメラ
-      { fps: 10, qrbox: { width: 260, height: 120 } }, // 横長の読み取り枠
+      { fps: 10, qrbox: { width: 320, height: 160 } }, // 横長の読み取り枠
       async (text) => {
         if (!isValidJan(text)) return;        // 誤読はスキップ
         input.value = text;
