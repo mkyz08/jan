@@ -25,7 +25,7 @@
 <label for="jan">JANコード</label>
 <div class="row">
   <input id="jan" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="13" placeholder="例: 4901234567894">
-  <button id="scanBtn" type="button">カメラで読む２</button>
+  <button id="scanBtn" type="button">カメラで読む３</button>
 </div>
 
 <!-- カメラ切り替え（背面カメラが複数ある機種のみ表示） -->
@@ -96,6 +96,24 @@ async function listCameras(activeId) {
   } catch (e) {}
 }
 
+// カメラ一覧から背面カメラのIDを探す
+// （iPadのSafariは facingMode:"environment" を無視して前面カメラを返すことがあるため）
+async function findBackCameraId() {
+  try {
+    const cams = await Html5Qrcode.getCameras();   // ここでカメラ許可が求められる
+    const isBack = c => /背面|back|rear|environment/i.test(c.label);
+    const isWide = c => /超広角|ultra/i.test(c.label);
+    // 通常の背面カメラ → 超広角以外の背面 → どれでも背面、の順で選ぶ
+    const back =
+      cams.find(c => /^(背面カメラ|Back Camera)$/i.test(c.label.trim())) ||
+      cams.find(c => isBack(c) && !isWide(c)) ||
+      cams.find(isBack);
+    return back ? back.id : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // ズームとオートフォーカスの設定（対応している場合のみ）
 async function setupCameraControls() {
   zoomRow.hidden = true;
@@ -158,8 +176,9 @@ async function startScan() {
   btn.textContent = "停止";
   msg.textContent = "バーコードを枠内に横向きで合わせてください。ぼやける場合は少し離してズームで大きくしてください";
 
-  // 選択したカメラがあればそれを、なければ背面カメラを使う
-  const cameraConfig = selectedCamId || { facingMode: "environment" };
+  // 選択したカメラがあればそれを、なければ一覧から背面カメラを探して使う
+  const camId = selectedCamId || await findBackCameraId();
+  const cameraConfig = camId || { facingMode: { exact: "environment" } };
 
   try {
     await scanner.start(
