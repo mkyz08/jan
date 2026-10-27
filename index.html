@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JANコード読み取り</title>
+<!-- バーコード読み取りライブラリ（iPhoneのSafariはBarcodeDetector非対応のため使用） -->
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  body { font-family: -apple-system, "Hiragino Sans", sans-serif; margin: 0; padding: 16px; max-width: 480px; }
+  label { display: block; font-weight: 600; margin-bottom: 6px; }
+  .row { display: flex; gap: 8px; }
+  input { flex: 1; font-size: 18px; padding: 10px; border: 1px solid #999; border-radius: 6px; }
+  button { font-size: 16px; padding: 10px 14px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; }
+  #reader { margin-top: 12px; width: 100%; }
+  #msg { margin-top: 8px; font-size: 14px; color: #555; }
+</style>
+</head>
+<body>
+
+<label for="jan">JANコード</label>
+<div class="row">
+  <input id="jan" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="13" placeholder="例: 4901234567894">
+  <button id="scanBtn" type="button">カメラで読む</button>
+</div>
+<div id="reader"></div>
+<div id="msg"></div>
+
+<script>
+const input = document.getElementById("jan");
+const btn = document.getElementById("scanBtn");
+const msg = document.getElementById("msg");
+let scanner = null;
+
+// JAN（EAN-13 / EAN-8）のチェックディジット検証
+function isValidJan(code) {
+  if (!/^(\d{8}|\d{13})$/.test(code)) return false;
+  const d = code.split("").map(Number);
+  const check = d.pop();
+  let sum = 0;
+  d.reverse().forEach((n, i) => { sum += n * (i % 2 === 0 ? 3 : 1); });
+  return (10 - (sum % 10)) % 10 === check;
+}
+
+// 読み取り後にEnterを押したのと同じ処理を実行する
+function pressEnter(el) {
+  // Enterキーのイベントを送る（keydownでEnterを待っている処理が動く）
+  ["keydown", "keypress", "keyup"].forEach(type => {
+    el.dispatchEvent(new KeyboardEvent(type, {
+      key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true
+    }));
+  });
+  // 入力欄がフォーム内にあれば、Enterと同じようにフォームを送信する
+  if (el.form) {
+    el.form.requestSubmit ? el.form.requestSubmit() : el.form.submit();
+  }
+}
+
+async function stopScan() {
+  if (scanner) {
+    try { await scanner.stop(); scanner.clear(); } catch (e) {}
+    scanner = null;
+  }
+  btn.textContent = "カメラで読む";
+}
+
+btn.addEventListener("click", async () => {
+  if (scanner) { await stopScan(); return; }
+
+  scanner = new Html5Qrcode("reader", {
+    formatsToSupport: [
+      Html5QrcodeSupportedFormats.EAN_13,
+      Html5QrcodeSupportedFormats.EAN_8
+    ],
+    verbose: false
+  });
+
+  btn.textContent = "停止";
+  msg.textContent = "バーコードを枠内に横向きで合わせてください";
+
+  try {
+    await scanner.start(
+      { facingMode: "environment" },          // 背面カメラ
+      { fps: 10, qrbox: { width: 260, height: 120 } }, // 横長の読み取り枠
+      async (text) => {
+        if (!isValidJan(text)) return;        // 誤読はスキップ
+        input.value = text;
+        input.dispatchEvent(new Event("input", { bubbles: true })); // フレームワーク連携用
+        msg.textContent = "読み取りました: " + text;
+        if (navigator.vibrate) navigator.vibrate(100);
+        await stopScan();
+        pressEnter(input);                    // Enterを自動実行
+      }
+    );
+  } catch (err) {
+    msg.textContent = "カメラを起動できません。HTTPSで開いているか、カメラの許可を確認してください。";
+    await stopScan();
+  }
+});
+</script>
+</body>
+</html>
