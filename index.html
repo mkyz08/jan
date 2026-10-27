@@ -158,15 +158,13 @@ async function startScan() {
   btn.textContent = "停止";
   msg.textContent = "バーコードを枠内に横向きで合わせてください。ぼやける場合は少し離してズームで大きくしてください";
 
-  // 高めの解像度を要求（細いバーが潰れにくくなる）
-  const videoConstraints = { width: { ideal: 1920 }, height: { ideal: 1080 } };
-  if (selectedCamId) videoConstraints.deviceId = { exact: selectedCamId };
-  else videoConstraints.facingMode = "environment";   // 背面カメラ
+  // 選択したカメラがあればそれを、なければ背面カメラを使う
+  const cameraConfig = selectedCamId || { facingMode: "environment" };
 
   try {
     await scanner.start(
-      { facingMode: "environment" },   // videoConstraints指定時はこちらは使われない
-      { fps: 10, qrbox: { width: 260, height: 120 }, videoConstraints },
+      cameraConfig,
+      { fps: 10, qrbox: { width: 260, height: 120 } },
       async (text) => {
         if (!isValidJan(text)) return;        // 誤読はスキップ
         input.value = text;
@@ -179,6 +177,7 @@ async function startScan() {
     );
     await setupCameraControls();
   } catch (err) {
+    selectedCamId = null;   // 次回は背面カメラの自動選択に戻す
     msg.textContent = "カメラを起動できません。HTTPSで開いているか、カメラの許可を確認してください。";
     await stopScan();
   }
