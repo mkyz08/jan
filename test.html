@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>カメラ診断</title>
+<style>
+  body { font-family: -apple-system, "Hiragino Sans", sans-serif; margin: 0; padding: 16px; max-width: 520px; }
+  button { font-size: 15px; padding: 8px 12px; margin: 4px 4px 0 0; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; }
+  video { width: 100%; margin-top: 12px; background: #000; min-height: 200px; }
+  pre { font-size: 12px; white-space: pre-wrap; background: #f2f2f2; padding: 8px; border-radius: 6px; }
+</style>
+</head>
+<body>
+<button id="startBtn" type="button">1. カメラ一覧を取得</button>
+<div id="cams"></div>
+<video id="v" playsinline muted autoplay></video>
+<pre id="log"></pre>
+
+<script>
+const v = document.getElementById("v");
+const logEl = document.getElementById("log");
+let stream = null;
+
+function log(s) { logEl.textContent += s + "\n"; }
+
+function stopStream() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null;
+  v.srcObject = null;
+}
+
+async function useCamera(deviceId, label) {
+  stopStream();
+  log("---- 起動: " + label);
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: { exact: deviceId } }, audio: false
+    });
+    const t = stream.getVideoTracks()[0];
+    log("取得したカメラ: " + t.label);
+    log("状態: " + t.readyState + " / muted=" + t.muted + " / enabled=" + t.enabled);
+    log("設定: " + JSON.stringify(t.getSettings()));
+    t.onmute = () => log("※ 映像がmuted（停止）になった");
+    t.onunmute = () => log("映像が再開した");
+    t.onended = () => log("※ トラックが終了した");
+    v.srcObject = stream;
+    await v.play();
+    setTimeout(() => log("2秒後の映像サイズ: " + v.videoWidth + "x" + v.videoHeight +
+      " / muted=" + t.muted), 2000);
+  } catch (e) {
+    log("エラー: " + e.name + " / " + e.message);
+  }
+}
+
+document.getElementById("startBtn").addEventListener("click", async () => {
+  logEl.textContent = "";
+  try {
+    // 許可を得るため一度だけ起動して止める（これでカメラ名が取れる）
+    const s = await navigator.mediaDevices.getUserMedia({ video: true });
+    s.getTracks().forEach(t => t.stop());
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
+    const box = document.getElementById("cams");
+    box.innerHTML = "";
+    devs.forEach((d, i) => {
+      log("カメラ" + (i + 1) + ": " + (d.label || "(名前なし)"));
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = d.label || ("カメラ" + (i + 1));
+      b.onclick = () => useCamera(d.deviceId, b.textContent);
+      box.appendChild(b);
+    });
+    log("↑ ボタンを押して各カメラを試してください");
+  } catch (e) {
+    log("エラー: " + e.name + " / " + e.message);
+  }
+});
+</script>
+</body>
+</html>
