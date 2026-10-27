@@ -4,14 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>JANコード読み取り</title>
-<!-- バーコード読み取りライブラリ（iPhoneのSafariはBarcodeDetector非対応のため使用） -->
+<!-- バーコード読み取りライブラリ（iPhone/iPadのSafariはBarcodeDetector非対応のため使用） -->
 <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <style>
   body { font-family: -apple-system, "Hiragino Sans", sans-serif; margin: 0; padding: 16px; max-width: 480px; }
   label { display: block; font-weight: 600; margin-bottom: 6px; }
-  .row { display: flex; gap: 8px; }
-  input { flex: 1; font-size: 18px; padding: 10px; border: 1px solid #999; border-radius: 6px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  input[type=text] { flex: 1; font-size: 18px; padding: 10px; border: 1px solid #999; border-radius: 6px; }
   button { font-size: 16px; padding: 10px 14px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; }
+  select { flex: 1; font-size: 16px; padding: 8px; }
+  input[type=range] { flex: 1; }
+  .sub { margin-top: 10px; font-size: 14px; }
+  .sub[hidden] { display: none; }
   #reader { margin-top: 12px; width: 100%; }
   #msg { margin-top: 8px; font-size: 14px; color: #555; }
 </style>
@@ -23,6 +27,20 @@
   <input id="jan" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="13" placeholder="例: 4901234567894">
   <button id="scanBtn" type="button">カメラで読む</button>
 </div>
+
+<!-- カメラ切り替え（背面カメラが複数ある機種のみ表示） -->
+<div id="camRow" class="row sub" hidden>
+  <span>カメラ</span>
+  <select id="camSel"></select>
+</div>
+
+<!-- ズーム（Safariがズームに対応している場合のみ表示） -->
+<div id="zoomRow" class="row sub" hidden>
+  <span>ズーム</span>
+  <input id="zoom" type="range">
+  <span id="zoomVal"></span>
+</div>
+
 <div id="reader"></div>
 <div id="msg"></div>
 
@@ -30,7 +48,14 @@
 const input = document.getElementById("jan");
 const btn = document.getElementById("scanBtn");
 const msg = document.getElementById("msg");
+const camRow = document.getElementById("camRow");
+const camSel = document.getElementById("camSel");
+const zoomRow = document.getElementById("zoomRow");
+const zoom = document.getElementById("zoom");
+const zoomVal = document.getElementById("zoomVal");
 let scanner = null;
+let selectedCamId = null;   // ユーザーが選んだカメラ（未選択なら背面カメラを自動選択）
+const DEFAULT_ZOOM = 2;     // 起動時のズーム倍率（離して構えてもバーコードが大きく写るように）
 
 // JAN（EAN-13 / EAN-8）のチェックディジット検証
 function isValidJan(code) {
@@ -44,29 +69,84 @@ function isValidJan(code) {
 
 // 読み取り後にEnterを押したのと同じ処理を実行する
 function pressEnter(el) {
-  // Enterキーのイベントを送る（keydownでEnterを待っている処理が動く）
   ["keydown", "keypress", "keyup"].forEach(type => {
     el.dispatchEvent(new KeyboardEvent(type, {
       key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true
     }));
   });
-  // 入力欄がフォーム内にあれば、Enterと同じようにフォームを送信する
   if (el.form) {
     el.form.requestSubmit ? el.form.requestSubmit() : el.form.submit();
   }
 }
+
+// カメラ一覧を表示（カメラ許可後でないと名前が取れないため、起動後に呼ぶ）
+async function listCameras(activeId) {
+  try {
+    const cams = await Html5Qrcode.getCameras();
+    if (cams.length < 2) return;
+    camSel.innerHTML = "";
+    cams.forEach(c => {
+      const o = document.createElement("option");
+      o.value = c.id;
+      o.textContent = c.label || c.id;
+      camSel.appendChild(o);
+    });
+    if (activeId) camSel.value = activeId;
+    camRow.hidden = false;
+  } catch (e) {}
+}
+
+// ズームとオートフォーカスの設定（対応している場合のみ）
+async function setupCameraControls() {
+  zoomRow.hidden = true;
+  let caps = {}, settings = {};
+  try {
+    caps = scanner.getRunningTrackCapabilities() || {};
+    settings = scanner.getRunningTrackSettings() || {};
+  } catch (e) { return; }
+
+  // 連続オートフォーカス（対応ブラウザのみ。iOS Safariは通常自動）
+  if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+    scanner.applyVideoConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+  }
+
+  if (caps.zoom) {
+    const max = Math.min(caps.zoom.max, 8);
+    zoom.min = caps.zoom.min;
+    zoom.max = max;
+    zoom.step = caps.zoom.step || 0.1;
+    const start = Math.min(Math.max(DEFAULT_ZOOM, caps.zoom.min), max);
+    zoom.value = start;
+    await applyZoom(start);
+    zoomRow.hidden = false;
+  }
+
+  await listCameras(settings.deviceId);
+}
+
+async function applyZoom(v) {
+  zoomVal.textContent = Number(v).toFixed(1) + "x";
+  if (!scanner) return;
+  try { await scanner.applyVideoConstraints({ advanced: [{ zoom: Number(v) }] }); } catch (e) {}
+}
+
+zoom.addEventListener("input", () => applyZoom(zoom.value));
+
+camSel.addEventListener("change", async () => {
+  selectedCamId = camSel.value;
+  if (scanner) { await stopScan(); await startScan(); }
+});
 
 async function stopScan() {
   if (scanner) {
     try { await scanner.stop(); scanner.clear(); } catch (e) {}
     scanner = null;
   }
+  zoomRow.hidden = true;
   btn.textContent = "カメラで読む";
 }
 
-btn.addEventListener("click", async () => {
-  if (scanner) { await stopScan(); return; }
-
+async function startScan() {
   scanner = new Html5Qrcode("reader", {
     formatsToSupport: [
       Html5QrcodeSupportedFormats.EAN_13,
@@ -76,26 +156,37 @@ btn.addEventListener("click", async () => {
   });
 
   btn.textContent = "停止";
-  msg.textContent = "バーコードを枠内に横向きで合わせてください";
+  msg.textContent = "バーコードを枠内に横向きで合わせてください。ぼやける場合は少し離してズームで大きくしてください";
+
+  // 高めの解像度を要求（細いバーが潰れにくくなる）
+  const videoConstraints = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+  if (selectedCamId) videoConstraints.deviceId = { exact: selectedCamId };
+  else videoConstraints.facingMode = "environment";   // 背面カメラ
 
   try {
     await scanner.start(
-      { facingMode: "environment" },          // 背面カメラ
-      { fps: 10, qrbox: { width: 320, height: 160 } }, // 横長の読み取り枠
+      { facingMode: "environment" },   // videoConstraints指定時はこちらは使われない
+      { fps: 10, qrbox: { width: 260, height: 120 }, videoConstraints },
       async (text) => {
         if (!isValidJan(text)) return;        // 誤読はスキップ
         input.value = text;
-        input.dispatchEvent(new Event("input", { bubbles: true })); // フレームワーク連携用
+        input.dispatchEvent(new Event("input", { bubbles: true }));
         msg.textContent = "読み取りました: " + text;
         if (navigator.vibrate) navigator.vibrate(100);
         await stopScan();
         pressEnter(input);                    // Enterを自動実行
       }
     );
+    await setupCameraControls();
   } catch (err) {
     msg.textContent = "カメラを起動できません。HTTPSで開いているか、カメラの許可を確認してください。";
     await stopScan();
   }
+}
+
+btn.addEventListener("click", async () => {
+  if (scanner) { await stopScan(); return; }
+  await startScan();
 });
 </script>
 </body>
